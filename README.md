@@ -54,9 +54,7 @@ PROJECT_DETECT_OBJECT — Real-time Object Recognition System (YOLOv11 + SAM2.1 
 PROJECT_DETECT_OBJECT/
 ## <!-- 
 ├── 📁 NOTEBOOK_TO_REPORT
-
 │   ├── 📄 Analyst_accuracy_segement.ipynb
-
 │   ├── 📄 Analyst_accuracy_yolo.ipynb
 
 │   ├── 📄 automatic_mask_generator_example.ipynb
