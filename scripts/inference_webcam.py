@@ -436,7 +436,7 @@ class YOLO_SAM2_Detector:
 
 
 def run_webcam_hybrid():
-    print("[INFO] 🚀 Khởi tạo YOLO + SAM2 hybrid detector...")
+    print("[INFO] Initialize YOLO + SAM2 hybrid detector...")
     detector = YOLO_SAM2_Detector(
         yolo_ckpt=os.path.join(BASE_DIR, "checkpoints", "yolo11n.pt"),
         sam2_ckpt=PATHS["SAM2_CKPT"],
@@ -448,7 +448,7 @@ def run_webcam_hybrid():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)
-    print("[INFO] Webcam sẵn sàng — nhấn 'Q' để thoát.")
+    print("[INFO] Webcam ready — press 'Q' to exit.")
 
     while True:
         ok, frame = cap.read()
