@@ -142,3 +142,8 @@ PROJECT_DETECT_OBJECT — Real-time Object Recognition System (YOLOv11 + SAM2.1 
         - Bounding box with label name and confidence
         - Live FPS counter in terminal
 
+🧑‍💻 Tác giả
+
+👤 Vo Anh Nhat
+📍 Đại học Giao thông vận tải
+📧 Email: voanhnhat1612@gmail.com
