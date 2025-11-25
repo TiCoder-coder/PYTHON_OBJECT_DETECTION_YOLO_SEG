@@ -4,10 +4,10 @@ import torchvision.transforms as T
 from torchvision import models
 import torch.nn.functional as F
 from ultralytics import YOLO
-
+import random
 BASE_DIR = "/media/voanhnhat/SDD_OUTSIDE1/PROJECT_DETECT_OBJECT"
 PATHS = {
-    "ANNOTATED_DIR": os.path.join(BASE_DIR, "data", "hybrid_data"),
+    "ANNOTATED_DIR": os.path.join(BASE_DIR, "data", "hybrid_data_test"),
     "SAM2_CKPT": os.path.join(BASE_DIR, "output", "sam2_finetuned_final.pth"),
     "SAM2_CONFIG": os.path.join(BASE_DIR, "configs", "sam2.1", "sam2.1_hiera_b+.yaml"),
 }
@@ -57,39 +57,49 @@ preprocess = T.Compose([
 ])
 
 def build_prototypes(annotated_dir, classes_in_ckpt, backbone, max_per_class=100):
-    prototypes = defaultdict(list)
-    img_patterns = ["**/*.jpg", "**/*.jpeg", "**/*.png"]
-    files = []
-    for pat in img_patterns:
-        files.extend(glob.glob(os.path.join(annotated_dir, pat), recursive=True))
-    for p in files:
-        name = os.path.basename(p).lower()
-        parent = os.path.basename(os.path.dirname(p)).lower()
-        matched = None
-        for cls in classes_in_ckpt:
-            cl = cls.lower()
-            if cl in name or cl == parent or cl in parent or cl in name:
-                matched = cls
-                break
-        if not matched:
+    coco_json = os.path.join(annotated_dir, "hybrid_coco.json")
+    if not os.path.exists(coco_json):
+        print("[ERR] hybrid_coco.json NOT FOUND")
+        return {}
+
+    with open(coco_json, "r") as f:
+        data = json.load(f)
+
+    id_to_name = {cat["id"]: cat["name"] for cat in data["categories"]}
+
+    class_to_images = defaultdict(list)
+    image_id_to_file = {img["id"]: img["file_name"] for img in data["images"]}
+
+    for ann in data["annotations"]:
+        cid = ann["category_id"]
+        cname = id_to_name[cid]
+
+        if cname not in classes_in_ckpt:
             continue
-        if len(prototypes[matched]) >= max_per_class:
-            continue
-        img = cv2.imread(p)
-        if img is None: continue
-        try:
+
+        img_file = os.path.join(annotated_dir, image_id_to_file[ann["image_id"]])
+        if os.path.exists(img_file):
+            class_to_images[cname].append(img_file)
+
+    prototypes = {}
+    for cls, files in class_to_images.items():
+        embs = []
+        for p in files[:max_per_class]:
+            img = cv2.imread(p)
+            if img is None: continue
+
             inp = preprocess(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).unsqueeze(0).to(device)
             with torch.no_grad():
                 emb = backbone(inp).squeeze().cpu().numpy()
-        except Exception as e:
-            continue
-        prototypes[matched].append(emb)
-    proto_mean = {}
-    for cls, embs in prototypes.items():
-        if len(embs) == 0: continue
-        proto_mean[cls] = np.mean(np.stack(embs, 0), axis=0)
-    print(f"[INFO] Built prototypes for {len(proto_mean)} / {len(classes_in_ckpt)} classes")
-    return proto_mean
+                embs.append(emb)
+
+        if len(embs) > 0:
+            prototypes[cls] = np.mean(np.stack(embs, 0), axis=0)
+
+    print(f"[INFO] Built prototypes for {len(prototypes)} / {len(classes_in_ckpt)} classes")
+    return prototypes
+
+
 
 def generate_grid_boxes(w, h, scales=(0.15, 0.3, 0.45, 0.6), stride=150):
     boxes = []
@@ -166,12 +176,8 @@ class SAM2Detector:
                     proto_sim_th=0.6,
                     stride=200,
                     scales=(0.18, 0.3, 0.45)):
-        """
-        Phiên bản tối ưu realtime:
-        - Tạo lưới box vừa phải, bỏ vùng trống (low variance)
-        - Predict batch nhỏ với SAM2
-        - Ghép nhiều vật thể riêng biệt
-        """
+        
+
         H, W = frame.shape[:2]
         rgb_small = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         scale_factor = 0.6
@@ -217,11 +223,11 @@ class SAM2Detector:
                 continue
 
             for j, sc in enumerate(scores):
-                if float(sc) < box_sc_th:
+                if float(sc) < 0.20:
                     continue
                 mask = masks[j].astype(np.uint8)
                 area = int(mask.sum())
-                if area < mask_area_th:
+                if area < 300:
                     continue
                 ys, xs = np.where(mask > 0)
                 if ys.size == 0:
@@ -234,9 +240,12 @@ class SAM2Detector:
                 crop = frame[by1:by2, bx1:bx2]
                 if crop.size == 0:
                     continue
-                cls_name, sim, emb = self._match_class(crop) if self.prototypes else ("Unknown", 0.0, None)
+                cls_name, sim, emb = self._match_class(crop)
+
                 if sim < proto_sim_th:
                     continue
+
+
 
                 detections.append({
                     "box": [bx1, by1, bx2, by2],
@@ -311,7 +320,16 @@ class YOLO_SAM2_Detector:
         self.yolo = YOLO(yolo_ckpt)
         self.yolo.to(device)
         print("[INFO] YOLO loaded.")
+        self.cls_color_map = {}
 
+        for cls_id, cls_name in self.yolo.model.names.items():
+            random.seed(cls_id * 999)   # cố định màu theo class
+            self.cls_color_map[cls_name] = (
+                random.randint(60, 255),
+                random.randint(60, 255),
+                random.randint(60, 255)
+            )
+        print("[INFO] Auto color map generated for classes:", self.cls_color_map)
         print("[INIT] Loading SAM2...")
         sd, info = load_sam2_weights(sam2_ckpt)
         self.classes = info.get("classes", [])
@@ -343,18 +361,36 @@ class YOLO_SAM2_Detector:
 
     @torch.inference_mode()
     def infer_frame(self, frame, conf_thres=0.35, proto_sim_th=0.40):
+        scale_factor = 1.0
+
         """
         YOLO detect → SAM2 refine mask (batch) → multi-object detection
         """
         detections = []
 
         yolo_results = self.yolo.predict(frame, conf=conf_thres, verbose=False)
+
         boxes = []
+        cls_ids = []
+        scores_yolo = []
+
         for r in yolo_results:
             if len(r.boxes) == 0:
                 continue
+
             xyxys = r.boxes.xyxy.cpu().numpy()
-            boxes.extend([tuple(map(int, box)) for box in xyxys])
+            confs = r.boxes.conf.cpu().numpy()
+            clses = r.boxes.cls.cpu().numpy()
+
+            for b, c, cls_i in zip(xyxys, confs, clses):
+                boxes.append(tuple(map(int, b)))
+                scores_yolo.append(float(c))
+                cls_ids.append(int(cls_i))
+
+
+        if len(boxes) == 0:
+            return []
+
         if not boxes:
             return []
 
@@ -393,7 +429,17 @@ class YOLO_SAM2_Detector:
             mask = masks[i]
             if mask.ndim > 2:
                 mask = mask[0]
+
             mask = mask.astype(np.uint8)
+
+            mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)
+
+            color = self.cls_color_map.get(self.yolo.model.names[cls_ids[i]], (0, 255, 0))
+
+            overlay = np.zeros_like(frame, dtype=np.uint8)
+            overlay[mask > 0] = color
+
+            frame = cv2.addWeighted(frame, 1.0, overlay, 0.45, 0)
 
             if mask.sum() < 200:
                 continue
@@ -401,26 +447,32 @@ class YOLO_SAM2_Detector:
             coords = np.argwhere(mask > 0)
             if coords.size == 0:
                 continue
+
             ys, xs = coords[:, 0], coords[:, 1]
-            bx1, by1, bx2, by2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
-            bx1, by1 = max(0, bx1), max(0, by1)
-            bx2, by2 = min(W - 1, bx2), min(H - 1, by2)
 
-            crop = frame[by1:by2, bx1:bx2]
-            if crop.size == 0:
-                continue
+            bx1 = int(xs.min())
+            by1 = int(ys.min())
+            bx2 = int(xs.max())
+            by2 = int(ys.max())
 
-            cls_name, sim, emb = self._match_class(crop)
-            if sim < proto_sim_th:
-                continue
+
+            bx1 = max(0, bx1)
+            by1 = max(0, by1)
+            bx2 = min(W-1, bx2)
+            by2 = min(H-1, by2)
+
+
+            x1, y1, x2, y2 = boxes[i]
 
             detections.append({
-                "box": [bx1, by1, bx2, by2],
-                "score": float(score),
-                "cls": cls_name,
-                "sim": float(sim),
-                "emb": emb
+                "box": [x1, y1, x2, y2],
+                "score": scores_yolo[i],
+                "cls": self.yolo.model.names[cls_ids[i]],
+                "sim": 1.0,
+                "emb": None
             })
+
+
 
         if not detections:
             return []
@@ -460,22 +512,79 @@ def run_webcam_hybrid():
         dets = detector.infer_frame(frame, conf_thres=0.35, proto_sim_th=0.40)
         tracked = tracker.update(dets)
 
-        out = frame.copy()
+        out = frame
+        total = len(tracked)
+        class_counts = {}
+        for d in tracked:
+            cls = d["cls"]
+            class_counts[cls] = class_counts.get(cls, 0) + 1
+
+        # -------- DRAW HEADER BAR --------
+        header_text = f"Detected: {total}  |  " + "  |  ".join([f"{cls}: {cnt}" for cls, cnt in class_counts.items()])
+        (hh, ww) = out.shape[:2]
+
+        cv2.rectangle(out, (0, 0), (ww, 40), (30, 30, 30), -1)
+        cv2.putText(out, header_text, (10, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 220, 100), 2)
+
+        # -------- COLOR PALETTE --------
+        cls_color_map = {
+            "person": (0, 255, 170),
+            "cup": (0, 220, 255),
+            "toothbrush": (150, 255, 0),
+            "bottle": (255, 180, 0),
+            "chair": (255, 120, 200),
+            "book": (200, 255, 255),
+            "bowl": (180, 140, 255),
+            "dining_table": (255, 90, 100),
+        }
+
+        # -------- DRAW EACH OBJECT --------
         for d in tracked:
             x1, y1, x2, y2 = map(int, d["box"])
-            color = (int(37*d['id'] % 255), int(17*d['id'] % 255), int(233*d['id'] % 255))
+            cls = d["cls"]
+            score = d["score"]
 
-            label = f"{d['cls']} {d['score']:.2f} sim:{d['sim']:.2f} id:{d['id']}"
-            
+            color = cls_color_map.get(cls, (0, 255, 0))
+
+            # bounding box
             cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(out, label, (x1, max(20, y1 - 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
+            # label background
+            label = f"{cls} {score:.2f}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
 
+            cv2.rectangle(out, (x1, y1 - th - 6), (x1 + tw + 6, y1),
+                        color, -1)
+            cv2.putText(out, label, (x1 + 3, y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 20, 20), 2)
+
+        # -------- FPS DISPLAY (Neon Glow Style, FIXED WIDTH) --------
         fps = 1.0 / (time.time() - start + 1e-6)
-        (h, w) = out.shape[:2]
-        cv2.putText(out, f"FPS: {fps:.1f}", (w - 120, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
+        fps_text = f"FPS: {fps:.1f}"
+
+        # lấy width/height real từ frame
+        (hh, ww) = out.shape[:2]
+
+        (font_w, font_h), _ = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+
+        pad = 10
+        x1 = ww - font_w - 40   # FIXED: dùng ww
+        y1 = 50
+        x2 = ww - 10
+        y2 = y1 + font_h + 20
+
+        overlay = out.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (30, 30, 30), -1)     # nền tối
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 255), 2)    # viền neon
+
+        alpha = 0.25
+        out = cv2.addWeighted(overlay, alpha, out, 1 - alpha, 0)
+
+        cv2.putText(out, fps_text, (x1 + 12, y1 + font_h + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2)
+
+
         cv2.imshow("YOLO + SAM2 Multi-Object Detection", out)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
