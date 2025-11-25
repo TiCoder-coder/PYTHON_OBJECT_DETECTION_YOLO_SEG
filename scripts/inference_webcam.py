@@ -558,7 +558,7 @@ def run_webcam_hybrid():
         (font_w, font_h), _ = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
 
         pad = 10
-        x1 = ww - font_w - 40   # FIXED: dùng ww
+        x1 = ww - font_w - 40
         y1 = 50
         x2 = ww - 10
         y2 = y1 + font_h + 20
